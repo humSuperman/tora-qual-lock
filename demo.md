@@ -1,8 +1,6 @@
-# tora-qual-lock 使用示例（tora-test）
+# tora-qual-lock 使用示例
 
 一个最小的 Spring Boot 项目，演示引入插件后怎么用：**注解**扣减、**调用方法**查询 / 扣减 / 调整、管理后台看日志。没有权限和用户系统，代码只有一个 Controller。
-
-示例项目在 `~/works/java/tora-test`，下面贴的是完整代码，照着建一个项目也能跑起来。
 
 ## 场景
 
@@ -17,15 +15,6 @@
 
 10 个测试用户的 id 是固定的 uuid，写在 Controller 里。
 
-## 启动
-
-```bash
-# 1. 安装插件到本地仓库（没有 Redis / Docker 时加 -DskipTests）
-cd ~/works/java/mvn-package/tora-qual-lock && mvn install
-
-# 2. 启动：JDK 17，本地 MySQL（root/123456）、Redis（6379）
-cd ~/works/java/tora-test && mvn spring-boot:run
-```
 
 - 数据库 `tora_test` 不存在时自动创建，日志表启动时由 `db/schema.sql` 建（`IF NOT EXISTS`）。
 - 管理后台（不鉴权）：http://localhost:8090/tora-qual-log.html
@@ -98,7 +87,7 @@ spring:
   datasource:
     url: jdbc:mysql://127.0.0.1:3306/tora_test?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Tokyo&useSSL=false&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
     username: root
-    password: 123456
+    password: ******
   data:
     redis:
       host: 127.0.0.1
