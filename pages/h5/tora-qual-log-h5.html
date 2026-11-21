@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>资格日志</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f2329; background: #f5f6f7; padding-bottom: env(safe-area-inset-bottom); }
+  header { position: sticky; top: 0; z-index: 2; display: flex; gap: 8px; padding: 10px 12px; background: #fff; box-shadow: 0 1px 0 #eef0f1; }
+  header input { flex: 1; height: 34px; padding: 0 10px; border: 0; border-radius: 17px; background: #f2f3f5; font-size: 14px; min-width: 0; }
+  header button { height: 34px; padding: 0 12px; border: 0; border-radius: 17px; background: #f2f3f5; font-size: 14px; }
+  .quota { margin: 12px; padding: 12px; border-radius: 8px; background: #fff; display: none; }
+  .quota .grid { display: grid; grid-template-columns: repeat(3, 1fr); text-align: center; gap: 8px; }
+  .quota b { display: block; font-size: 20px; }
+  .quota .meta { margin-top: 8px; color: #8f959e; font-size: 12px; text-align: center; }
+  .item { margin: 10px 12px; padding: 12px; border-radius: 8px; background: #fff; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .name { font-weight: 500; word-break: break-all; }
+  .tag { flex: none; padding: 0 6px; border-radius: 3px; font-size: 12px; background: #eef3ff; color: #3370ff; }
+  .tag.CREATE { background: #e8f7ea; color: #2ea121; } .tag.DELETE { background: #fdecec; color: #d83931; }
+  .amount { font-size: 18px; font-weight: 600; } .neg { color: #d83931; } .pos { color: #2ea121; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin-top: 8px; font-size: 13px; color: #646a73; }
+  .kv span:nth-child(odd) { color: #8f959e; }
+  .muted { color: #8f959e; text-align: center; padding: 16px; }
+  .error { color: #d83931; text-align: center; padding: 16px; }
+  .mask { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 3; display: none; }
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; background: #fff; border-radius: 12px 12px 0 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); transform: translateY(100%); transition: transform .2s; }
+  .sheet.open { transform: none; }
+  .sheet label { display: block; margin-bottom: 12px; color: #646a73; font-size: 13px; }
+  .sheet input, .sheet select { display: block; width: 100%; height: 38px; margin-top: 4px; padding: 0 10px; border: 1px solid #e5e6eb; border-radius: 6px; font-size: 15px; background: #fff; }
+  .sheet .check { display: flex; align-items: center; gap: 8px; }
+  .sheet .check input { width: auto; height: auto; margin: 0; }
+  .sheet .btns { display: flex; gap: 10px; }
+  .sheet .btns button { flex: 1; height: 42px; border: 0; border-radius: 21px; font-size: 15px; background: #f2f3f5; }
+  .sheet .btns .primary { background: #3370ff; color: #fff; }
+</style>
+</head>
+<body>
+
+<header>
+  <input id="kw" placeholder="资格名，如 lottery:prize" enterkeyhint="search">
+  <button id="btnFilter">筛选</button>
+</header>
+
+<div class="quota" id="quota"></div>
+<div id="list"></div>
+<div id="foot" class="muted"></div>
+
+<div class="mask" id="mask"></div>
+<div class="sheet" id="sheet">
+  <label>后缀（用户 id）<input id="suffix"></label>
+  <label class="check"><input type="checkbox" id="shared"> 只看共用资格</label>
+  <label>开始时间<input type="datetime-local" id="from"></label>
+  <label>结束时间<input type="datetime-local" id="to"></label>
+  <label>类型<select id="types"><option value="">全部</option><option value="CREATE">创建</option><option value="UPDATE">更新</option><option value="DELETE">删除</option></select></label>
+  <label>更新内容<select id="fields"><option value="">全部</option><option value="TOTAL">总资格</option><option value="AVAILABLE">可用资格</option><option value="EXPIRE">有效期</option></select></label>
+  <label>业务单号<input id="bizId"></label>
+  <div class="btns"><button id="btnReset">重置</button><button class="primary" id="btnOk">查询</button></div>
+</div>
+
+<script>
+/* ======== 按项目改这里 ======== */
+var TORA_QUAL = {
+  base: '/tora-qual',          // 接口前缀（tora.qual.web.path，前面加 context-path / 网关前缀）
+  token: '',                   // 配了 tora.qual.web.token 时填上
+  headers: function () { return {}; }   // 项目自己的登录凭证
+};
+/* ============================== */
+
+(function () {
+  var TYPE = { CREATE: '创建', UPDATE: '更新', DELETE: '删除' };
+  var FIELD = { TOTAL: '总资格', AVAILABLE: '可用资格', EXPIRE: '有效期' };
+  var PAGE_SIZE = 20;
+  var state = { pageNum: 1, total: 0, loading: false, done: false };
+
+  function $(id) { return document.getElementById(id); }
+  function esc(v) { return v == null ? '' : String(v).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function arrow(a, b) { return a === b ? esc(a) : esc(a) + ' → ' + esc(b); }
+  function time(v) { return v ? v.replace('T', ' ') + (v.length === 16 ? ':00' : '') : ''; }
+  function unwrap(res) {
+    if (res && res.list === undefined && res.exists === undefined && res.data !== undefined) { return res.data; }
+    return res;
+  }
+  function request(path, params) {
+    var qs = Object.keys(params).filter(function (k) { return params[k] !== '' && params[k] != null; })
+      .map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); }).join('&');
+    var headers = TORA_QUAL.headers() || {};
+    if (TORA_QUAL.token) { headers['X-Qual-Token'] = TORA_QUAL.token; }
+    return fetch(TORA_QUAL.base + path + (qs ? '?' + qs : ''), { headers: headers, credentials: 'include' })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          if (!r.ok) { throw new Error((body && (body.error || body.msg || body.message)) || ('HTTP ' + r.status)); }
+          return unwrap(body);
+        });
+      });
+  }
+
+  function card(l) {
+    var cls = l.amount < 0 ? 'neg' : (l.amount > 0 ? 'pos' : '');
+    return '<div class="item">' +
+      '<div class="row"><span class="name">' + esc(l.name) + (l.suffix ? ':' + esc(l.suffix) : '（共用）') + '</span>' +
+      '<span class="tag ' + esc(l.type) + '">' + (TYPE[l.type] || esc(l.type)) + (l.field ? '·' + (FIELD[l.field] || esc(l.field)) : '') + '</span></div>' +
+      '<div class="row"><span class="muted" style="padding:0;text-align:left">' + esc(l.createdAt) + '</span>' +
+      '<span class="amount ' + cls + '">' + (l.amount > 0 ? '+' : '') + esc(l.amount) + '</span></div>' +
+      '<div class="kv">' +
+      '<span>总资格</span><span>' + arrow(l.totalBefore, l.totalAfter) + '</span>' +
+      '<span>已用</span><span>' + arrow(l.usedBefore, l.usedAfter) + '</span>' +
+      '<span>可用</span><span>' + arrow(l.availableBefore, l.availableAfter) + '</span>' +
+      '<span>到期</span><span>' + (l.expireBefore === l.expireAfter ? esc(l.expireAfter || '永不过期') : esc(l.expireBefore || '-') + ' → ' + esc(l.expireAfter || '-')) + '</span>' +
+      (l.bizId ? '<span>单号</span><span>' + esc(l.bizId) + '</span>' : '') +
+      (l.remark ? '<span>备注</span><span>' + esc(l.remark) + '</span>' : '') +
+      '</div></div>';
+  }
+
+  function load(reset) {
+    if (state.loading || (!reset && state.done)) { return Promise.resolve(); }
+    if (reset) { state.pageNum = 1; state.done = false; $('list').innerHTML = ''; }
+    state.loading = true;
+    $('foot').className = 'muted';
+    $('foot').textContent = '加载中…';
+    var shared = $('shared').checked;
+    return request('/logs', {
+      name: $('kw').value.trim(), suffix: shared ? '' : $('suffix').value.trim(), shared: shared ? 1 : '',
+      from: time($('from').value), to: time($('to').value), types: $('types').value, fields: $('fields').value,
+      bizId: $('bizId').value.trim(), pageNum: state.pageNum, pageSize: PAGE_SIZE
+    }).then(function (page) {
+      var list = page.list || [];
+      state.total = page.total || 0;
+      $('list').insertAdjacentHTML('beforeend', list.map(card).join(''));
+      state.done = state.pageNum * PAGE_SIZE >= state.total;
+      state.pageNum++;
+      $('foot').textContent = state.total === 0 ? '没有数据' : (state.done ? '共 ' + state.total + ' 条，没有更多了' : '上拉加载更多');
+    }).catch(function (e) {
+      $('foot').className = 'error';
+      $('foot').textContent = '查询失败：' + e.message;
+    }).then(function () { state.loading = false; });
+  }
+
+  function quota() {
+    var name = $('kw').value.trim();
+    var box = $('quota');
+    if (!name) { box.style.display = 'none'; return Promise.resolve(); }
+    var shared = $('shared').checked;
+    return request('/quota', { name: name, suffix: shared ? '' : $('suffix').value.trim() }).then(function (q) {
+      box.style.display = 'block';
+      if (!q.exists) { box.innerHTML = '<div class="muted" style="padding:0">Redis 里没有这个资格（还没用过，或已过期 / 删除）</div>'; return; }
+      box.innerHTML = '<div class="grid">' +
+        '<div><b>' + esc(q.total) + '</b>总资格</div>' +
+        '<div><b>' + esc(q.used) + '</b>已用</div>' +
+        '<div><b class="' + (q.available < 0 ? 'neg' : '') + '">' + esc(q.available) + '</b>可用</div></div>' +
+        '<div class="meta">' + esc(q.rule) + ' · 到期 ' + esc(q.expireAt || '永不过期') + (q.overused ? ' · <span class="neg">已超用</span>' : '') + '</div>';
+    }).catch(function () { box.style.display = 'none'; });
+  }
+
+  function open(v) { $('sheet').classList.toggle('open', v); $('mask').style.display = v ? 'block' : 'none'; }
+  function go() { open(false); quota(); return load(true); }
+
+  $('btnFilter').onclick = function () { open(true); };
+  $('mask').onclick = function () { open(false); };
+  $('btnOk').onclick = go;
+  $('btnReset').onclick = function () {
+    ['suffix', 'from', 'to', 'types', 'fields', 'bizId'].forEach(function (id) { $(id).value = ''; });
+    $('shared').checked = false;
+  };
+  $('kw').onkeydown = function (e) { if (e.key === 'Enter') { this.blur(); go(); } };
+  window.addEventListener('scroll', function () {
+    if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 80) { load(false); }
+  });
+  window.__toraQual = { load: load, quota: quota, go: go, state: state };
+  load(true);
+})();
+</script>
+</body>
+</html>

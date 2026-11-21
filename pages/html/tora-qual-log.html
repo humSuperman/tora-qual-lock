@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>资格日志查询</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f2329; background: #f5f6f7; }
+  .card { background: #fff; border-radius: 6px; padding: 16px; margin-bottom: 12px; }
+  h2 { margin: 0 0 12px; font-size: 16px; }
+  .form { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+  .form label { display: flex; align-items: center; gap: 6px; }
+  input, select { height: 30px; padding: 0 8px; border: 1px solid #d0d3d6; border-radius: 4px; font-size: 13px; }
+  input[type=checkbox] { height: auto; }
+  button { height: 30px; padding: 0 14px; border: 1px solid #d0d3d6; border-radius: 4px; background: #fff; cursor: pointer; }
+  button.primary { background: #3370ff; border-color: #3370ff; color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px; border-bottom: 1px solid #eef0f1; text-align: left; white-space: nowrap; }
+  th { background: #f8f9fa; font-weight: 500; color: #646a73; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .neg { color: #d83931; } .pos { color: #2ea121; }
+  .tag { display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 12px; background: #eef3ff; color: #3370ff; }
+  .tag.DELETE { background: #fdecec; color: #d83931; } .tag.CREATE { background: #e8f7ea; color: #2ea121; }
+  .scroll { overflow-x: auto; }
+  .pager { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; }
+  .muted { color: #8f959e; }
+  .error { color: #d83931; }
+  .quota { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 10px; }
+  .quota b { font-size: 18px; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h2>当前资格</h2>
+  <div class="form">
+    <label>资格名 <input id="qName" placeholder="如 lottery:prize"></label>
+    <label>后缀 <input id="qSuffix" placeholder="用户 id，留空为共用资格"></label>
+    <button class="primary" id="btnQuota">查看</button>
+  </div>
+  <div id="quotaBox" class="quota muted">输入资格名查看 Redis 里现在的值</div>
+</div>
+
+<div class="card">
+  <h2>变更日志</h2>
+  <div class="form">
+    <label>资格名 <input id="name" placeholder="如 lottery:prize"></label>
+    <label>后缀 <input id="suffix" placeholder="用户 id"></label>
+    <label><input type="checkbox" id="shared"> 只看共用资格</label>
+    <label>时间 <input type="datetime-local" id="from"> 至 <input type="datetime-local" id="to"></label>
+    <label>类型 <select id="types"><option value="">全部</option><option value="CREATE">创建</option><option value="UPDATE">更新</option><option value="DELETE">删除</option></select></label>
+    <label>更新内容 <select id="fields"><option value="">全部</option><option value="TOTAL">总资格</option><option value="AVAILABLE">可用资格</option><option value="EXPIRE">有效期</option></select></label>
+    <label>业务单号 <input id="bizId"></label>
+    <button class="primary" id="btnSearch">查询</button>
+    <button id="btnReset">重置</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="scroll">
+    <table>
+      <thead>
+      <tr>
+        <th>时间</th><th>资格</th><th>类型</th><th>变化</th><th>总资格</th><th>已用</th><th>可用</th>
+        <th>到期时间</th><th>业务单号</th><th>备注</th>
+      </tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="10" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="pager">
+    <span id="total" class="muted"></span>
+    <select id="pageSize"><option>20</option><option>50</option><option>100</option></select>
+    <button id="prev">上一页</button>
+    <span id="pageNo">1</span>
+    <button id="next">下一页</button>
+  </div>
+</div>
+
+<script>
+/* ======== 按项目改这里 ======== */
+var TORA_QUAL = {
+  // 接口前缀：插件的 tora.qual.web.path，前面加上项目的 context-path / 网关前缀
+  base: '/tora-qual',
+  // 配了 tora.qual.web.token 时填上
+  token: '',
+  // 项目自己的登录凭证，比如 return { Authorization: 'Bearer ' + localStorage.getItem('token') }
+  headers: function () { return {}; }
+};
+/* ============================== */
+
+(function () {
+  var TYPE = { CREATE: '创建', UPDATE: '更新', DELETE: '删除' };
+  var FIELD = { TOTAL: '总资格', AVAILABLE: '可用资格', EXPIRE: '有效期' };
+  var state = { pageNum: 1, pageSize: 20, total: 0 };
+
+  function $(id) { return document.getElementById(id); }
+  function esc(v) { return v == null ? '' : String(v).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function arrow(a, b) { return a === b ? esc(a) : esc(a) + ' → ' + esc(b); }
+
+  // 项目有统一返回体（{ code, data: {...} }）时取 data
+  function unwrap(res) {
+    if (res && res.list === undefined && res.exists === undefined && res.data !== undefined) { return res.data; }
+    return res;
+  }
+
+  function request(path, params) {
+    var qs = Object.keys(params).filter(function (k) { return params[k] !== '' && params[k] != null; })
+      .map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); }).join('&');
+    var headers = TORA_QUAL.headers() || {};
+    if (TORA_QUAL.token) { headers['X-Qual-Token'] = TORA_QUAL.token; }
+    return fetch(TORA_QUAL.base + path + (qs ? '?' + qs : ''), { headers: headers, credentials: 'include' })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          if (!r.ok) { throw new Error((body && (body.error || body.msg || body.message)) || ('HTTP ' + r.status)); }
+          return unwrap(body);
+        });
+      });
+  }
+
+  function time(v) { return v ? v.replace('T', ' ') + (v.length === 16 ? ':00' : '') : ''; }
+
+  function search() {
+    var tbody = $('rows');
+    tbody.innerHTML = '<tr><td colspan="10" class="muted">加载中…</td></tr>';
+    var shared = $('shared').checked;
+    return request('/logs', {
+      name: $('name').value.trim(), suffix: shared ? '' : $('suffix').value.trim(), shared: shared ? 1 : '',
+      from: time($('from').value), to: time($('to').value), types: $('types').value, fields: $('fields').value,
+      bizId: $('bizId').value.trim(), pageNum: state.pageNum, pageSize: state.pageSize
+    }).then(function (page) {
+      state.total = page.total || 0;
+      var list = page.list || [];
+      tbody.innerHTML = list.length ? list.map(function (l) {
+        var cls = l.amount < 0 ? 'neg' : (l.amount > 0 ? 'pos' : '');
+        return '<tr>' +
+          '<td>' + esc(l.createdAt) + '</td>' +
+          '<td>' + esc(l.name) + (l.suffix ? ':' + esc(l.suffix) : ' <span class="muted">(共用)</span>') + '</td>' +
+          '<td><span class="tag ' + esc(l.type) + '">' + (TYPE[l.type] || esc(l.type)) + (l.field ? '·' + (FIELD[l.field] || esc(l.field)) : '') + '</span></td>' +
+          '<td class="num ' + cls + '">' + (l.amount > 0 ? '+' : '') + esc(l.amount) + '</td>' +
+          '<td class="num">' + arrow(l.totalBefore, l.totalAfter) + '</td>' +
+          '<td class="num">' + arrow(l.usedBefore, l.usedAfter) + '</td>' +
+          '<td class="num">' + arrow(l.availableBefore, l.availableAfter) + '</td>' +
+          '<td>' + (l.expireBefore === l.expireAfter ? esc(l.expireAfter || '永不过期') : esc(l.expireBefore || '-') + ' → ' + esc(l.expireAfter || '-')) + '</td>' +
+          '<td>' + esc(l.bizId) + '</td>' +
+          '<td>' + esc(l.remark) + '</td>' +
+          '</tr>';
+      }).join('') : '<tr><td colspan="10" class="muted">没有数据</td></tr>';
+      renderPager();
+    }).catch(function (e) {
+      tbody.innerHTML = '<tr><td colspan="10" class="error">查询失败：' + esc(e.message) + '</td></tr>';
+    });
+  }
+
+  function renderPager() {
+    var pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+    $('total').textContent = '共 ' + state.total + ' 条';
+    $('pageNo').textContent = state.pageNum + ' / ' + pages;
+    $('prev').disabled = state.pageNum <= 1;
+    $('next').disabled = state.pageNum >= pages;
+  }
+
+  function quota() {
+    var name = $('qName').value.trim();
+    var box = $('quotaBox');
+    if (!name) { box.className = 'quota error'; box.textContent = '请输入资格名'; return Promise.resolve(); }
+    box.className = 'quota muted';
+    box.textContent = '加载中…';
+    return request('/quota', { name: name, suffix: $('qSuffix').value.trim() }).then(function (q) {
+      if (!q.exists) { box.textContent = 'Redis 里没有这个资格（还没用过，或者已经过期 / 删除）'; return; }
+      box.className = 'quota';
+      box.innerHTML =
+        '<div>总资格<br><b>' + esc(q.total) + '</b></div>' +
+        '<div>已用<br><b>' + esc(q.used) + '</b></div>' +
+        '<div>可用<br><b class="' + (q.available < 0 ? 'neg' : '') + '">' + esc(q.available) + '</b>' + (q.overused ? ' <span class="neg">已超用</span>' : '') + '</div>' +
+        '<div>有效期<br><b>' + esc(q.rule) + '</b></div>' +
+        '<div>到期时间<br><b>' + esc(q.expireAt || '永不过期') + '</b></div>';
+    }).catch(function (e) {
+      box.className = 'quota error';
+      box.textContent = '查询失败：' + e.message;
+    });
+  }
+
+  $('btnSearch').onclick = function () { state.pageNum = 1; search(); };
+  $('btnReset').onclick = function () {
+    ['name', 'suffix', 'from', 'to', 'types', 'fields', 'bizId'].forEach(function (id) { $(id).value = ''; });
+    $('shared').checked = false;
+    state.pageNum = 1;
+    search();
+  };
+  $('shared').onchange = function () { $('suffix').disabled = this.checked; };
+  $('pageSize').onchange = function () { state.pageSize = +this.value; state.pageNum = 1; search(); };
+  $('prev').onclick = function () { state.pageNum--; search(); };
+  $('next').onclick = function () { state.pageNum++; search(); };
+  $('btnQuota').onclick = quota;
+
+  // 地址栏带 ?name=xxx&suffix=yyy 时直接查
+  var params = new URLSearchParams(location.search);
+  if (params.get('name')) { $('name').value = $('qName').value = params.get('name'); }
+  if (params.get('suffix')) { $('suffix').value = $('qSuffix').value = params.get('suffix'); }
+  window.__toraQual = { search: search, quota: quota, state: state };
+  search();
+})();
+</script>
+</body>
+</html>
